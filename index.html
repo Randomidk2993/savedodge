@@ -38,7 +38,6 @@ if (location.protocol.substr(0, 4) === "file")
   var SAVE_KEY_PREFIX = 'savethedoge_save_backup';
   var SAVE_INTERVAL_MS = 5000;
 
-  // Construct typically uses a DB named after the project or 'Construct'
   var DB_NAMES = ['Construct', 'SaveTheDoge', 'c3storage', 'c2storage'];
 
   function safeIndexedDB() {
@@ -168,10 +167,9 @@ if (location.protocol.substr(0, 4) === "file")
         };
         openReq.onsuccess = function(e) {
           var db = e.target.result;
-          // Make sure all stores exist (version may already be up to date)
           var existingStores = Array.from(db.objectStoreNames);
           var missingStores = storeNames.filter(function(s) { return !existingStores.includes(s); });
-          
+
           function doRestore() {
             var remaining = storeNames.length;
             storeNames.forEach(function(storeName) {
@@ -192,7 +190,6 @@ if (location.protocol.substr(0, 4) === "file")
           }
 
           if (missingStores.length > 0) {
-            // Need to upgrade the DB version to add missing stores
             db.close();
             var version = db.version + 1;
             var upgradeReq = idb.open(dbName, version);
@@ -218,16 +215,13 @@ if (location.protocol.substr(0, 4) === "file")
     });
   }
 
-  // Backup on page hide/unload
   window.addEventListener('beforeunload', backupSave);
   document.addEventListener('visibilitychange', function() {
     if (document.visibilityState === 'hidden') backupSave();
   });
 
-  // Periodic backup
   setInterval(backupSave, SAVE_INTERVAL_MS);
 
-  // Restore before game scripts run, then start periodic backup
   console.log('[SaveFix] Restoring Save the Doge save data...');
   restoreSave(function() {
     console.log('[SaveFix] Restore complete.');
@@ -247,9 +241,6 @@ if (location.protocol.substr(0, 4) === "file")
 <script src="scripts/supportcheck.js"></script>
 <script src="scripts/offlineclient.js" type="module"></script>
 <script src="scripts/main.js" type="module"></script>
-<!-- <script src="scripts/register-sw.js" type="module"></script> -->
-<script src="js/analytics_ubg_v1_4.js"></script>
-<script src="js/ubg235_client_v1_1.js"></script>
 <!-- Firebase (compat) -->
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
