@@ -27,6 +27,216 @@ if (location.protocol.substr(0, 4) === "file")
 	alert("Web exports won't work until you upload them. (When running on the file: protocol, browsers block many features from working for security reasons.)");
 }
 </script>
+
+<!-- ============================================================
+     SAVE FIX: Backs up Construct's IndexedDB saves to localStorage
+     and restores them on load, so saves survive in Google Sites
+     iframes where IndexedDB may be cleared between sessions.
+     ============================================================ -->
+<script type="text/javascript">
+(function() {
+  var SAVE_KEY_PREFIX = 'savethedoge_save_backup';
+  var SAVE_INTERVAL_MS = 5000;
+
+  // Construct typically uses a DB named after the project or 'Construct'
+  var DB_NAMES = ['Construct', 'SaveTheDoge', 'c3storage', 'c2storage'];
+
+  function safeIndexedDB() {
+    try { return window.indexedDB || window.mozIndexedDB || window.webkitIndexedDB; }
+    catch(e) { return null; }
+  }
+
+  function dumpStore(db, storeName, callback) {
+    try {
+      var tx = db.transaction([storeName], 'readonly');
+      var store = tx.objectStore(storeName);
+      var result = {};
+      var req = store.openCursor();
+      req.onsuccess = function(e) {
+        var cursor = e.target.result;
+        if (cursor) {
+          var val = cursor.value;
+          if (val instanceof Uint8Array || val instanceof ArrayBuffer) {
+            var arr = val instanceof ArrayBuffer ? new Uint8Array(val) : val;
+            var binary = '';
+            arr.forEach(function(b) { binary += String.fromCharCode(b); });
+            result[cursor.key] = { type: 'binary', data: btoa(binary) };
+          } else if (typeof val === 'object' && val !== null) {
+            try { result[cursor.key] = { type: 'json', data: JSON.stringify(val) }; }
+            catch(e) { result[cursor.key] = { type: 'raw', data: String(val) }; }
+          } else {
+            result[cursor.key] = { type: 'raw', data: val };
+          }
+          cursor.continue();
+        } else {
+          callback(result);
+        }
+      };
+      req.onerror = function() { callback(null); };
+    } catch(e) { callback(null); }
+  }
+
+  function restoreStore(db, storeName, data, callback) {
+    try {
+      var tx = db.transaction([storeName], 'readwrite');
+      var store = tx.objectStore(storeName);
+      var keys = Object.keys(data);
+      var i = 0;
+      function next() {
+        if (i >= keys.length) { if(callback) callback(); return; }
+        var key = keys[i++];
+        var entry = data[key];
+        var val;
+        if (entry.type === 'binary') {
+          var binary = atob(entry.data);
+          var arr = new Uint8Array(binary.length);
+          for (var j = 0; j < binary.length; j++) arr[j] = binary.charCodeAt(j);
+          val = arr;
+        } else if (entry.type === 'json') {
+          try { val = JSON.parse(entry.data); } catch(e) { val = entry.data; }
+        } else {
+          val = entry.data;
+        }
+        var req = store.put(val, key);
+        req.onsuccess = next;
+        req.onerror = next;
+      }
+      next();
+    } catch(e) { if(callback) callback(); }
+  }
+
+  function backupDB(dbName) {
+    var idb = safeIndexedDB();
+    if (!idb) return;
+    try {
+      var req = idb.open(dbName);
+      req.onsuccess = function(e) {
+        var db = e.target.result;
+        var storeNames = Array.from(db.objectStoreNames);
+        if (storeNames.length === 0) { db.close(); return; }
+        var allData = {};
+        var remaining = storeNames.length;
+        storeNames.forEach(function(storeName) {
+          dumpStore(db, storeName, function(data) {
+            if (data && Object.keys(data).length > 0) allData[storeName] = data;
+            remaining--;
+            if (remaining === 0) {
+              if (Object.keys(allData).length > 0) {
+                try {
+                  localStorage.setItem(SAVE_KEY_PREFIX + '_' + dbName, JSON.stringify(allData));
+                  console.log('[SaveFix] Backed up save data for DB:', dbName);
+                } catch(e) {
+                  console.warn('[SaveFix] localStorage write failed:', e);
+                }
+              }
+              db.close();
+            }
+          });
+        });
+      };
+      req.onerror = function() {};
+    } catch(e) {}
+  }
+
+  function backupSave() {
+    DB_NAMES.forEach(function(dbName) { backupDB(dbName); });
+  }
+
+  function restoreSave(callback) {
+    var idb = safeIndexedDB();
+    if (!idb) { callback(); return; }
+    var pending = DB_NAMES.length;
+    function done() { pending--; if (pending <= 0) callback(); }
+
+    DB_NAMES.forEach(function(dbName) {
+      var raw;
+      try { raw = localStorage.getItem(SAVE_KEY_PREFIX + '_' + dbName); } catch(e) {}
+      if (!raw) { done(); return; }
+      try {
+        var allData = JSON.parse(raw);
+        var storeNames = Object.keys(allData);
+        if (storeNames.length === 0) { done(); return; }
+
+        var openReq = idb.open(dbName, 1);
+        openReq.onupgradeneeded = function(e) {
+          var db = e.target.result;
+          storeNames.forEach(function(storeName) {
+            if (!db.objectStoreNames.contains(storeName)) {
+              db.createObjectStore(storeName);
+            }
+          });
+        };
+        openReq.onsuccess = function(e) {
+          var db = e.target.result;
+          // Make sure all stores exist (version may already be up to date)
+          var existingStores = Array.from(db.objectStoreNames);
+          var missingStores = storeNames.filter(function(s) { return !existingStores.includes(s); });
+          
+          function doRestore() {
+            var remaining = storeNames.length;
+            storeNames.forEach(function(storeName) {
+              if (!db.objectStoreNames.contains(storeName)) {
+                remaining--;
+                if (remaining === 0) { db.close(); done(); }
+                return;
+              }
+              restoreStore(db, storeName, allData[storeName], function() {
+                remaining--;
+                if (remaining === 0) {
+                  console.log('[SaveFix] Restored save data for DB:', dbName);
+                  db.close();
+                  done();
+                }
+              });
+            });
+          }
+
+          if (missingStores.length > 0) {
+            // Need to upgrade the DB version to add missing stores
+            db.close();
+            var version = db.version + 1;
+            var upgradeReq = idb.open(dbName, version);
+            upgradeReq.onupgradeneeded = function(e) {
+              var db2 = e.target.result;
+              missingStores.forEach(function(storeName) {
+                if (!db2.objectStoreNames.contains(storeName)) {
+                  db2.createObjectStore(storeName);
+                }
+              });
+            };
+            upgradeReq.onsuccess = function(e) {
+              db = e.target.result;
+              doRestore();
+            };
+            upgradeReq.onerror = function() { done(); };
+          } else {
+            doRestore();
+          }
+        };
+        openReq.onerror = function() { done(); };
+      } catch(e) { done(); }
+    });
+  }
+
+  // Backup on page hide/unload
+  window.addEventListener('beforeunload', backupSave);
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'hidden') backupSave();
+  });
+
+  // Periodic backup
+  setInterval(backupSave, SAVE_INTERVAL_MS);
+
+  // Restore before game scripts run, then start periodic backup
+  console.log('[SaveFix] Restoring Save the Doge save data...');
+  restoreSave(function() {
+    console.log('[SaveFix] Restore complete.');
+  });
+
+})();
+</script>
+<!-- ============================================================ -->
+
 <script src="box2d.wasm.js"></script>
 <noscript>
 <div id="notSupportedWrap">
